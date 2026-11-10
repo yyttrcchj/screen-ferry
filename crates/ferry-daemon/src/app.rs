@@ -454,10 +454,7 @@ fn list_peers(store: &Store) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// 请正在运行的后台发送文件。路径先转成绝对路径，后台的工作目录与这里不同。
-fn send_files(
-    store: &Store,
-    paths: Vec<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn send_files(store: &Store, paths: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
     let mut absolute = Vec::with_capacity(paths.len());
     for path in paths {
         let path =
