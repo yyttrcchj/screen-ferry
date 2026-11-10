@@ -133,14 +133,14 @@ pub fn relaunch_elevated(args: &[OsString]) -> Result<()> {
 pub fn show_error(message: &str) {
     let message = HSTRING::from(message);
     // SAFETY: 字符串在调用期间一直有效；消息框只读它，返回后立即释放。
-    let _ = unsafe {
+    unsafe {
         MessageBoxW(
             None,
             PCWSTR(message.as_ptr()),
             w!("ScreenFerry"),
             MB_OK | MB_ICONERROR | MB_SETFOREGROUND,
         );
-    };
+    }
 }
 
 /// 把参数拼成 Windows 命令行，按 `CommandLineToArgvW` 的规则加引号。
