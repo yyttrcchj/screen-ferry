@@ -167,6 +167,7 @@ where
         clip_limit: config.clipboard_limit.clone(),
         in_session: false,
         cursor_hidden: false,
+        injection_blocked: false,
         edge: config.edge.clone(),
         peer_side: None,
         server: None,
@@ -221,6 +222,7 @@ where
         client.edge.reset();
         client.release_all();
         client.hide_cursor(false);
+        client.injection_blocked = false;
         client.active.send_replace(false);
         if std::mem::take(&mut client.in_session)
             && let Some(peer) = client.server
@@ -471,6 +473,8 @@ struct Client<I: InputInject, K, P> {
     in_session: bool,
     /// 本机光标是否被隐藏（光标在服务端屏幕上）。
     cursor_hidden: bool,
+    /// 上一次注入是否被系统权限拦住；只在状态变化时记一条日志，避免每个事件刷一行。
+    injection_blocked: bool,
     /// 边缘投递：报告本机光标和朝向服务端的那条边。
     edge: EdgeFeed,
     /// 服务端在本机的哪一侧；服务端说了才知道。
@@ -914,8 +918,22 @@ impl<I: InputInject, K: Clipboard, P: ConfirmPairing> Client<I, K, P> {
 
     fn inject(&mut self, event: &InputEvent) {
         match self.inject.inject(event) {
-            Ok(()) => {}
+            Ok(()) => {
+                if self.injection_blocked {
+                    self.injection_blocked = false;
+                    info!("恢复向当前前台窗口注入输入");
+                }
+            }
             Err(e @ PlatformError::Unsupported(_)) => debug!("跳过：{e}"),
+            Err(e @ PlatformError::PermissionDenied(_)) => {
+                if !self.injection_blocked {
+                    self.injection_blocked = true;
+                    warn!(
+                        ?event,
+                        "注入失败：{e}。如果正在操作以管理员身份运行的软件，请确认 ScreenFerry 后台拥有管理员权限"
+                    );
+                }
+            }
             Err(e) => warn!(?event, "注入失败：{e}"),
         }
     }

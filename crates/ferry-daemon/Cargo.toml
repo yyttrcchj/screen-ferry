@@ -14,6 +14,7 @@ test = false
 [dependencies]
 ferry-core.workspace = true
 ferry-engine.workspace = true
+ferry-ipc.workspace = true
 ferry-platform.workspace = true
 ferry-store.workspace = true
 ferry-trust.workspace = true

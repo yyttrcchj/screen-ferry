@@ -36,7 +36,8 @@ ADR 0003 计划把 `ferry-settings` 编成动态库，经 flutter_rust_bridge �
 - 首次配对在界面上核对配对码。没有界面连着时，后台先打开设置界面。
 - 引擎对外报告连接、断开、往返延迟、光标进出、剪贴板同步、配对结果。屏幕方向、⌘ 与 Ctrl 互换即时生效；其余设置改变时重启引擎，连接约一秒内恢复。暂停共享即停止引擎。
 - 托盘用 tray-icon。主线程运行平台事件循环（`ferry-platform` 新增 `EventLoop`），tokio 在另一个线程。
-- 开机自启：macOS 写 LaunchAgent，Windows 写 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`。是否开启以系统中的登记为准，不写进配置。
+- 开机自启：macOS 写 LaunchAgent；Windows 写当前用户的“登录时启动、最高权限”任务计划程序任务。
+  旧版本的 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 登记会自动迁移。是否开启以系统中的登记为准，不写进配置。
 
 ### 配置
 

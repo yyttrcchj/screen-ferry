@@ -15,6 +15,7 @@ fn settings_app(candidates: &[PathBuf]) -> Option<PathBuf> {
 }
 
 /// 登录时执行的命令：本程序加上 `--autostart`。
+#[cfg(target_os = "macos")]
 fn autostart_command() -> Option<Vec<String>> {
     let exe = exe_path()?;
     Some(vec![exe.display().to_string(), "--autostart".into()])
@@ -92,7 +93,7 @@ mod mac {
     }
 
     impl NativeHost {
-        pub(crate) fn new() -> Self {
+        pub(crate) fn new(_data_dir: Option<&Path>) -> Self {
             let autostart =
                 autostart_command().and_then(|args| MacAutostart::new(BUNDLE_ID, args).ok());
             Self {
@@ -252,6 +253,7 @@ pub(crate) use win::NativeHost;
 
 #[cfg(target_os = "windows")]
 mod win {
+    use std::ffi::OsString;
     use std::os::windows::process::CommandExt;
     use std::path::Path;
     use std::process::{Command, Stdio};
@@ -264,18 +266,22 @@ mod win {
     use ferry_types::Role;
     use tracing::{info, warn};
 
-    use super::{autostart_command, exe_dir, settings_app};
+    use super::{exe_dir, exe_path, settings_app};
 
     pub(crate) struct NativeHost {
         autostart: Option<WinAutostart>,
     }
 
     impl NativeHost {
-        pub(crate) fn new() -> Self {
-            // 命令行：路径带引号（可能含空格），后面跟参数。
-            let autostart = autostart_command().map(|args| {
-                let command = format!("\"{}\" {}", args[0], args[1..].join(" "));
-                WinAutostart::new("ScreenFerry", &command)
+        pub(crate) fn new(data_dir: Option<&Path>) -> Self {
+            let autostart = exe_path().map(|exe| {
+                let mut arguments = Vec::new();
+                if let Some(dir) = data_dir {
+                    arguments.push(OsString::from("--data-dir"));
+                    arguments.push(dir.as_os_str().to_owned());
+                }
+                arguments.push(OsString::from("--autostart"));
+                WinAutostart::new(ferry_platform_windows::TASK_NAME, exe, arguments)
             });
             // 开着自启时按本程序现在的位置重新登记：换了安装位置（例如从解压的文件夹换成安装版）
             // 以后，登录时启动的仍是正在用的这一份。
@@ -357,16 +363,31 @@ mod win {
             };
             info!(path = %exe.display(), "打开设置界面");
             ferry_platform_windows::allow_foreground();
-            let mut command = Command::new(&exe);
-            // 后台已经没有控制台，标准输入输出都不交给它；工作目录设为它自己所在的目录。
-            command
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-            if let Some(dir) = exe.parent() {
-                command.current_dir(dir);
-            }
-            if let Err(e) = command.spawn() {
+            // 后台以管理员身份运行；直接启动会让设置界面继承管理员令牌。交给资源管理器启动，
+            // 新进程就是普通权限，和从开始菜单打开时一样。
+            let result = if ferry_platform_windows::is_process_elevated().unwrap_or(false) {
+                let explorer = std::env::var_os("SystemRoot")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"))
+                    .join("explorer.exe");
+                Command::new(explorer)
+                    .arg(&exe)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+            } else {
+                let mut command = Command::new(&exe);
+                command
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                if let Some(dir) = exe.parent() {
+                    command.current_dir(dir);
+                }
+                command.spawn()
+            };
+            if let Err(e) = result {
                 warn!("打开设置界面失败：{e}");
             }
         }

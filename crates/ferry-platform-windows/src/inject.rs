@@ -8,6 +8,7 @@ pub(crate) mod hider;
 
 use ferry_platform::{Error, InputInject, Result};
 use ferry_types::{InputEvent, KeyAction, KeyCode, LockKeys, MouseButton, Point};
+use windows::Win32::Foundation::ERROR_ACCESS_DENIED;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBD_EVENT_FLAGS, KEYBDINPUT,
     KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSE_EVENT_FLAGS,
@@ -21,7 +22,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     XBUTTON1, XBUTTON2,
 };
 
-use crate::display::{ensure_dpi_aware, last_error};
+use crate::display::ensure_dpi_aware;
 use crate::keymap::{WinKey, win_key};
 use hider::CursorHider;
 
@@ -170,7 +171,26 @@ fn send(input: INPUT) -> Result<()> {
     if sent == 1 {
         Ok(())
     } else {
-        Err(last_error("SendInput"))
+        let error = std::io::Error::last_os_error();
+        // SendInput 被 UIPI 拦下时，Windows 文档不保证 GetLastError 会说明原因；
+        // 再看一眼前台窗口，至少把“管理员窗口在前台”这个最常见的情况说清楚。
+        let uipi_blocked = match (
+            crate::elevation::is_process_elevated(),
+            crate::elevation::foreground_is_elevated(),
+        ) {
+            (Ok(false), Ok(true)) => true,
+            _ => error.raw_os_error() == Some(ERROR_ACCESS_DENIED.0 as i32),
+        };
+        if uipi_blocked {
+            Err(Error::PermissionDenied(
+                "当前前台窗口以管理员身份运行，ScreenFerry 后台需要管理员权限才能控制它",
+            ))
+        } else {
+            Err(Error::Os {
+                call: "SendInput",
+                detail: error.to_string(),
+            })
+        }
     }
 }
 

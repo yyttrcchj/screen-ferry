@@ -13,6 +13,7 @@ test = false
 ferry-core.workspace = true
 ferry-platform.workspace = true
 ferry-types.workspace = true
+tracing.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows.workspace = true

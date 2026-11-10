@@ -72,7 +72,13 @@ About the Windows installer:
 
 - It isn't code-signed. If SmartScreen blocks it, choose More info → Run anyway.
 - It installs into Program Files and allows ScreenFerry through the firewall on private and domain networks.
-- Updates install silently after one administrator prompt. While another computer controls this one, use this computer's own keyboard and mouse to approve it. Uninstall from Settings → Apps; your settings and pairings are kept.
+- The background service runs with administrator rights so it can control windows of apps that run as administrator.
+  The installer starts it elevated, and with Start at Login on, a highest-privilege scheduled task takes over at
+  logon. Launching the app by hand only asks that task to start the service, so no administrator prompt appears.
+  The one exception is a direct run with no task registered (a development build).
+  The settings window and command-line commands run without elevation; use an administrator terminal if you need to
+  debug an administrator app with `serve` or `connect`.
+- Updates install silently: the background already runs as administrator, so there is no extra prompt. Uninstall from Settings → Apps; your settings and pairings are kept.
 
 ## Usage
 

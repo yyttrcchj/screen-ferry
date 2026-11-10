@@ -2,6 +2,7 @@
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -9,6 +10,8 @@ use ferry_engine::{ClientConfig, EdgeFeed, Events, Files, Live, ServerAddr, Serv
 use ferry_store::Store;
 use ferry_trust::Fingerprint;
 use ferry_types::{Config, DeviceSettings, ModifierPreset, uses_command_key};
+#[cfg(target_os = "windows")]
+use tracing::warn;
 use tracing::{error, info};
 
 use crate::cli::{Mode, Options, Parsed};
@@ -49,7 +52,11 @@ pub(crate) fn init_output(parsed: &Result<Parsed, String>) {
 }
 
 pub(crate) fn run(options: Options) -> ExitCode {
-    let store = match &options.data_dir {
+    let data_dir = options
+        .data_dir
+        .clone()
+        .map(|dir| std::path::absolute(&dir).unwrap_or(dir));
+    let store = match &data_dir {
         Some(dir) => Store::open(dir),
         None => Store::open_default(),
     };
@@ -60,8 +67,20 @@ pub(crate) fn run(options: Options) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let verbose = options.verbose;
     match options.mode {
-        Mode::Resident { autostart } => return report(resident(store, autostart)),
+        Mode::Resident {
+            autostart,
+            elevation_attempted,
+        } => {
+            return report(resident(
+                store,
+                autostart,
+                data_dir,
+                verbose,
+                elevation_attempted,
+            ));
+        }
         Mode::Peers => return report(list_peers(&store)),
         Mode::Forget { target } => return report(forget(&store, &target)),
         Mode::Send { paths } => return report(send_files(&store, paths)),
@@ -170,13 +189,35 @@ pub(crate) fn run(options: Options) -> ExitCode {
 ///
 /// 主线程运行系统事件循环和托盘图标；引擎与本机通信在另一个线程的 tokio 运行时里。
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn resident(store: Store, autostart: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn resident(
+    store: Store,
+    autostart: bool,
+    data_dir: Option<PathBuf>,
+    verbose: bool,
+    elevation_attempted: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     use ferry_engine::resident::{self, Command};
     use ferry_platform::EventLoop;
+
+    #[cfg(target_os = "macos")]
+    let _ = (&data_dir, verbose, elevation_attempted);
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
+
+    #[cfg(target_os = "windows")]
+    if prepare_windows(
+        &store,
+        &runtime,
+        autostart,
+        data_dir.as_deref(),
+        verbose,
+        elevation_attempted,
+    )? {
+        return Ok(());
+    }
+
     if runtime.block_on(resident::hand_over_to_running(&store)) {
         info!("ScreenFerry 已在运行，已请它打开设置界面");
         return Ok(());
@@ -210,7 +251,12 @@ fn resident(store: Store, autostart: bool) -> Result<(), Box<dyn std::error::Err
                         }
                     }
                 });
-                let result = resident::run(store, crate::host::NativeHost::new(), control).await;
+                let result = resident::run(
+                    store,
+                    crate::host::NativeHost::new(data_dir.as_deref()),
+                    control,
+                )
+                .await;
                 drop(handle);
                 result
             });
@@ -227,8 +273,162 @@ fn resident(store: Store, autostart: bool) -> Result<(), Box<dyn std::error::Err
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn resident(_store: Store, _autostart: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn resident(
+    _store: Store,
+    _autostart: bool,
+    _data_dir: Option<PathBuf>,
+    _verbose: bool,
+    _elevation_attempted: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     Err("常驻运行目前只支持 macOS 和 Windows".into())
+}
+
+/// Windows 的常驻后台必须在登录时就是管理员权限，返回 `true` 表示当前进程已经让位给另一份。
+#[cfg(target_os = "windows")]
+fn prepare_windows(
+    store: &Store,
+    runtime: &tokio::runtime::Runtime,
+    autostart: bool,
+    data_dir: Option<&std::path::Path>,
+    verbose: bool,
+    elevation_attempted: bool,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    use std::ffi::OsString;
+
+    use ferry_engine::resident;
+    use ferry_ipc::Endpoint;
+
+    let elevated = match ferry_platform_windows::is_process_elevated() {
+        Ok(elevated) => elevated,
+        Err(e) => {
+            windows_start_error(&format!(
+                "ScreenFerry 无法确认自己的权限，常驻后台没有启动。\n\n{e}"
+            ));
+            return Err(e.into());
+        }
+    };
+
+    let running = Endpoint::load(&store.ipc_endpoint_path())
+        .ok()
+        .flatten()
+        .and_then(|endpoint| {
+            ferry_platform_windows::process_is_elevated(endpoint.pid)
+                .ok()
+                .map(|elevated| (endpoint.pid, elevated))
+        });
+
+    if !elevated {
+        if elevation_attempted {
+            windows_start_error(
+                "ScreenFerry 没有获得管理员权限，常驻后台没有启动。\n\n\
+                 要控制以管理员身份运行的软件，请在 Windows 用户账户控制窗口里点“是”。",
+            );
+            return Err("没有获得管理员权限".into());
+        }
+        // 已经有一份管理员后台在运行时，只需要请它打开设置界面，不必再弹一次 UAC。
+        if matches!(running, Some((_, true)))
+            && runtime.block_on(resident::hand_over_to_running(store))
+        {
+            info!("ScreenFerry 已在运行，已请它打开设置界面");
+            return Ok(true);
+        }
+
+        // 已经登记了“最高权限”的计划任务时，请任务计划程序启动它，不会弹 UAC。
+        // 没有任务（关掉了登录自启，或是直接运行的开发版本）才退回 UAC。
+        if ferry_platform_windows::run_task(ferry_platform_windows::TASK_NAME).is_ok() {
+            info!("已请任务计划程序按最高权限启动 ScreenFerry");
+            if wait_for_elevated_replacement(store) {
+                info!("管理员权限的后台已经启动，原进程退出");
+                return Ok(true);
+            }
+            warn!("计划任务没有在预期时间内启动，改请求管理员权限");
+        }
+
+        let mut args = Vec::new();
+        if let Some(dir) = data_dir {
+            args.push(OsString::from("--data-dir"));
+            args.push(dir.as_os_str().to_owned());
+        }
+        if autostart {
+            args.push(OsString::from("--autostart"));
+        }
+        if verbose {
+            args.push(OsString::from("-v"));
+        }
+        args.push(OsString::from("--elevation-attempt"));
+        match ferry_platform_windows::relaunch_elevated(&args) {
+            Ok(()) => {
+                info!("常驻后台需要管理员权限，已请求 Windows 重新启动");
+                // 新进程可能因为数据目录、任务计划或用户会话的问题启动失败。先等它写出
+                // ipc.json，确认它真的接管了，再把当前进程交出去；否则继续以当前权限运行，
+                // 至少不会在提权后留下一个没有任何后台的空档。
+                if wait_for_elevated_replacement(store) {
+                    info!("管理员权限的后台已经启动，原进程退出");
+                    return Ok(true);
+                }
+                warn!("管理员权限的后台没有在预期时间内启动，继续以当前权限运行");
+                return Ok(false);
+            }
+            Err(e) => {
+                windows_start_error(&format!(
+                    "ScreenFerry 需要管理员权限，才能控制以管理员身份运行的软件。\n\n\
+                     请在 Windows 用户账户控制窗口里点“是”。\n\n{e}"
+                ));
+                return Err(e.into());
+            }
+        }
+    }
+
+    // 新版本后台刚提升完权限时，上一份普通权限的后台可能还在。它必须先正常退出，
+    // 否则键鼠仍会被旧进程接管，管理员窗口里的问题也不会消失。
+    match running {
+        Some((_, true)) => {
+            if runtime.block_on(resident::hand_over_to_running(store)) {
+                info!("ScreenFerry 已在运行，已请它打开设置界面");
+                return Ok(true);
+            }
+        }
+        Some((_, false)) => match runtime.block_on(resident::quit_running(store)) {
+            Ok(true) => info!("已停止普通权限的旧后台，改以管理员权限启动"),
+            Ok(false) => {}
+            Err(e) => {
+                windows_start_error(&format!(
+                    "ScreenFerry 无法停止普通权限的旧后台，管理员权限的新后台没有启动。\n\n{e}"
+                ));
+                return Err(e.into());
+            }
+        },
+        None => {}
+    }
+    Ok(false)
+}
+
+/// 等待重新启动的管理员进程写下 `ipc.json`，并确认它确实是管理员权限的进程。
+///
+/// 这里不通过 IPC 发送任何请求：登录自启时不应该因为已有后台而弹出设置界面。只读取
+/// `ipc.json` 并查询 PID 的令牌即可确认接管完成。
+#[cfg(target_os = "windows")]
+fn wait_for_elevated_replacement(store: &Store) -> bool {
+    use std::time::{Duration, Instant};
+
+    let own_pid = std::process::id();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        if let Ok(Some(endpoint)) = ferry_ipc::Endpoint::load(&store.ipc_endpoint_path())
+            && endpoint.pid != own_pid
+            && ferry_platform_windows::process_is_elevated(endpoint.pid).unwrap_or(false)
+        {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn windows_start_error(message: &str) {
+    error!("{message}");
+    ferry_platform_windows::show_error(message);
 }
 
 fn report(result: Result<(), Box<dyn std::error::Error>>) -> ExitCode {

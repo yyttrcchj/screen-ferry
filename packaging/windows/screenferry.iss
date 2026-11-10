@@ -48,7 +48,8 @@ SetupLogging=yes
 ; 程序文件被占用时：安装前先请 ScreenFerry 自己退出（见 [Code]），剩下的交给系统的重启管理器关闭。
 CloseApplications=yes
 RestartApplications=no
-; 开机自启登记在当前用户名下（HKCU）：安装时改成新的位置，卸载时删掉（见 [Code]）。
+; 开机自启登记在当前用户名的“登录时、最高权限”计划任务下：安装时把旧的 HKCU 启动项迁过去，
+; 卸载时删掉（见 [Code] 和 [UninstallRun]）。计划任务由管理员登记，登录时不会再弹 UAC。
 UsedUserAreasWarning=no
 ; 按 Windows 的显示语言选：中文系统用简体中文，其他都用英文（排在第一个的语言），不弹出选择语言的对话框。
 LanguageDetectionMethod=uilanguage
@@ -84,11 +85,11 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopico
 ; 公用网络不放行，连到公用网络时 Windows 会照常询问。
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""{#AppName}"""; Flags: runhidden waituntilterminated; StatusMsg: "{cm:FirewallStatus}"
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""{#AppName}"" dir=in action=allow program=""{app}\{#AppExe}"" enable=yes profile=private,domain"; Flags: runhidden waituntilterminated
-; 安装前正在运行的：装完马上以原来的用户身份重新启动，不弹出设置界面。
+; 安装前正在运行的：装完马上重新启动，不弹出设置界面。
 ; 用户可能正从另一台电脑控制这台，这样不用等到点“完成”就能接着用键鼠。
-Filename: "{app}\{#AppExe}"; Parameters: "--autostart"; Flags: nowait runasoriginaluser; Check: WasRunning
+Filename: "{app}\{#AppExe}"; Parameters: "--autostart"; Flags: nowait; Check: WasRunning
 ; 第一次安装：完成页上可以选择启动，打开设置界面开始配对。
-Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent runasoriginaluser; Check: not WasRunning
+Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent; Check: not WasRunning
 
 [UninstallRun]
 ; 先请 ScreenFerry 正常退出（归还键鼠、松开按键），还在的再强行结束，然后删掉防火墙规则。
@@ -127,20 +128,41 @@ begin
   Result := '';
 end;
 
-{ 开着开机自启时，登记的可能还是旧的位置（例如解压版的文件夹），改成安装后的位置。 }
-procedure CurStepChanged(CurStep: TSetupStep);
+{ 旧版本把开机自启用 HKCU 的 Run 键登记为普通权限。装了新版本后换成最高权限的计划任务，
+  以后登录时不会再弹 UAC；迁移失败时保留旧值，等后台以后自己再试。 }
+procedure MigrateAutostart;
+var
+  Command: String;
+  Code: Integer;
+  Parameters: String;
 begin
-  if (CurStep = ssPostInstall) and RegValueExists(HKCU, RunKey, '{#AppName}') then
-    RegWriteStringValue(HKCU, RunKey, '{#AppName}', '"' + ExpandConstant('{app}\{#AppExe}') + '" --autostart');
+  if not RegQueryStringValue(HKCU, RunKey, '{#AppName}', Command) then
+    Exit;
+  Parameters := '/Create /F /SC ONLOGON /RL HIGHEST /IT /TN "' + '{#AppName}' + '" /TR "\"' +
+    ExpandConstant('{app}\{#AppExe}') + '\" --autostart"';
+  if Exec(ExpandConstant('{sys}\schtasks.exe'), Parameters, '', SW_HIDE,
+    ewWaitUntilTerminated, Code) and (Code = 0) then
+    RegDeleteValue(HKCU, RunKey, '{#AppName}');
 end;
 
-{ 卸载时删掉指向本程序的开机自启登记，登录时不再去找已经删掉的程序。 }
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    MigrateAutostart;
+end;
+
+{ 卸载时删掉计划任务和旧版本的 Run 登记，登录时不再去找已经删掉的程序。 }
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   Command: String;
+  Code: Integer;
 begin
-  if (CurUninstallStep = usUninstall)
-    and RegQueryStringValue(HKCU, RunKey, '{#AppName}', Command)
-    and (Pos(Lowercase(ExpandConstant('{app}')), Lowercase(Command)) > 0) then
-    RegDeleteValue(HKCU, RunKey, '{#AppName}');
+  if CurUninstallStep = usUninstall then
+  begin
+    Exec(ExpandConstant('{sys}\schtasks.exe'),
+      '/Delete /TN "' + '{#AppName}' + '" /F', '', SW_HIDE, ewWaitUntilTerminated, Code);
+    if RegQueryStringValue(HKCU, RunKey, '{#AppName}', Command)
+      and (Pos(Lowercase(ExpandConstant('{app}')), Lowercase(Command)) > 0) then
+      RegDeleteValue(HKCU, RunKey, '{#AppName}');
+  end;
 end;

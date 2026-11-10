@@ -6,5 +6,6 @@
 #![cfg(target_os = "windows")]
 
 mod clipboard;
+mod elevation;
 mod keymap;
 mod update;

@@ -68,6 +68,8 @@ pub(crate) enum Mode {
     /// 常驻运行，按 `config.toml` 工作。`autostart`：登录时由系统启动，不打开设置界面。
     Resident {
         autostart: bool,
+        /// 内部参数：这次已经是为提升权限而重新启动的进程，不能再弹一次 UAC。
+        elevation_attempted: bool,
     },
     Serve {
         listen: SocketAddr,
@@ -125,6 +127,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = String>) -> Result<Parsed, St
     let mut data_dir = None;
     let mut verbose = false;
     let mut autostart = false;
+    let mut elevation_attempted = false;
 
     while let Some(arg) = args.next() {
         let mut value = |flag: &str| args.next().ok_or_else(|| format!("{flag} 缺少取值"));
@@ -133,6 +136,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = String>) -> Result<Parsed, St
             "-v" | "--verbose" => verbose = true,
             "--data-dir" => data_dir = Some(PathBuf::from(value("--data-dir")?)),
             "--autostart" if command == "resident" => autostart = true,
+            "--elevation-attempt" if command == "resident" => elevation_attempted = true,
             "--name" if runs => name = Some(value("--name")?),
             "--no-clipboard" if runs => clipboard = false,
             "--listen" if command == "serve" => listen = resolve(&value("--listen")?)?,
@@ -154,7 +158,10 @@ pub(crate) fn parse(args: impl IntoIterator<Item = String>) -> Result<Parsed, St
     }
 
     let mode = match command.as_str() {
-        "resident" => Mode::Resident { autostart },
+        "resident" => Mode::Resident {
+            autostart,
+            elevation_attempted,
+        },
         "serve" => Mode::Serve {
             listen,
             side,
